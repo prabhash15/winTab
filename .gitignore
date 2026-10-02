@@ -1,0 +1,30 @@
+
+# Python bytecode and caches. `python3 -m unittest` and every tool here write
+# these; they are regenerated on the next run.
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtual environments, if you make one (the project runs on system python).
+.venv/
+venv/
+
+# Test and linter caches.
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Recordings and logs: `wintab --record FILE` and the probes write these, and
+# they are per-machine debug artefacts, not source.
+*.jsonl
+*.log
+
+# Editor and OS litter.
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store

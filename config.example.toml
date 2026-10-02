@@ -1,0 +1,103 @@
+# winTab configuration.
+#
+# Copy this to ~/.config/wintab/config.toml and edit what you need. Every key is
+# optional: anything you leave out keeps the default below. Unknown keys are
+# ignored with a warning, so an old file keeps working after an upgrade.
+#
+#     install.sh                          # copies this file into place, if absent
+#     python3 -m wintab --print-config    # show what is actually in effect
+
+# --- gesture feel ---------------------------------------------------------
+# Finger travel per card, as a fraction of the touchpad width. 0.13 is about
+# 17mm on a 128mm pad, so one window per ~8mm of travel: a flick of the fingers
+# rather than a drag. Raise it if a swipe overshoots a window you wanted, lower
+# it if moving between windows still feels like work.
+step_fraction = 0.13
+
+# Movement ignored before the swipe counts as real: keeps taps and jitter from
+# opening the strip.
+dead_zone_fraction = 0.025
+
+# How much more horizontal than vertical the movement must be.
+direction_dominance = 1.15
+
+# How far past a card you must travel to select it. 0.5 means "half a card",
+# and it is deliberately the same threshold the outline uses, so the card that
+# is outlined when you let go is exactly the card that opens, at any speed.
+commit_fraction = 0.5
+
+# Resistance when tugging past the first or last window (1.0 = none).
+rubber_band = 0.35
+
+# true swaps the direction (right would select the window to the left).
+invert_direction = false
+
+# All three fingers must land within this many milliseconds.
+arm_window_ms = 40.0
+
+# A three-finger tap -- shorter than this, and moving less than this fraction
+# of the pad -- is deliberately ignored: it never opens the strip, so the
+# gesture stays free for whatever else you bind it to.
+tap_max_ms = 300.0
+tap_max_move = 0.015
+
+# --- carousel layout ------------------------------------------------------
+slot_fraction = 0.22            # card slot width, as a fraction of the screen
+card_gap_fraction = 0.018       # space between slots
+max_card_height_fraction = 0.40  # tallest a card can be; aspect is preserved
+band_alpha = 0.12               # the lighter band the row sits on (0 = none)
+band_pad_px = 26                # how much taller than the row the band is
+card_radius = 8.0
+card_shadow_px = 26.0           # width of the soft shadow baked around a card
+dim_others = 0.18               # how much the cards you are not on are darkened
+
+# --- the selection outline ------------------------------------------------
+highlight_rgb = [0.0, 0.47, 0.83]  # Windows' accent blue
+highlight_px = 3.0                 # outline thickness
+highlight_gap_px = 4.0             # distance from the outline to the card's edge
+highlight_ms = 120                 # how long it takes to slide to the next card
+# The application's name, drawn under its card (increase if you cannot read it
+# from where you sit; 0 hides it).
+caption_font_px = 13.0
+caption_gap_px = 6.0
+# A small sideways tug of the whole row while you drag, in card widths.
+# 0 = the row stays perfectly still and only the outline moves.
+row_parallax = 0.0
+
+# --- visuals --------------------------------------------------------------
+dim = 0.30             # how much the backdrop is darkened
+blur_radius = 6.0      # gaussian radius, applied to a 1/8 size copy
+blur_downscale = 8     # bigger = faster and blurrier
+fade_ms = 120          # length of the fade back to your desktop
+
+# --- model ----------------------------------------------------------------
+# false = one card per window (Windows 11's strip). true = one card per
+# application, showing its most recently used window.
+group_by_app = false
+
+# Left-to-right order of the cards:
+#   "recent" (default) sorts by focus history, like Alt+Tab: the window you are
+#            on is always the first card, and the row rearranges after every
+#            switch so the next swipe starts from where you are.
+#   "opened" keeps the row still -- the order the windows were first opened --
+#            so the strip is the same picture every time and only the outline
+#            moves. The focused window can then sit anywhere in the row.
+order = "recent"
+
+# --- capture --------------------------------------------------------------
+capture_debounce_s = 0.4   # wait this long for the screen to settle
+capture_poll_s = 5.0       # fallback poll if the DAMAGE extension is missing
+
+# --- input ----------------------------------------------------------------
+# Substring of the touchpad's input device name; null/absent = the first device
+# whose name contains "touchpad".  See: python3 -m wintab --probe
+# touchpad_name = "HTIX5288"
+
+# true holds an X pointer grab for the duration of a swipe so the cursor cannot
+# wander off while three fingers are down. Off by default because most pads do
+# not need it; a crash can never leave your mouse stuck, X drops the grab.
+freeze_pointer = false
+
+# --- debug ----------------------------------------------------------------
+verbose = false   # print the window list and every gesture decision
+show_fps = false  # draw a frame-time readout on the overlay
