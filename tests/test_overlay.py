@@ -8,6 +8,7 @@ is easy to get subtly wrong.
 
 from __future__ import annotations
 
+import pathlib
 import unittest
 
 from PIL import Image
@@ -456,12 +457,16 @@ class _FakeGdkWindow:
     def raise_(self):
         self.calls.append("raise")
 
+    def set_keep_above(self, above: bool):
+        self.calls.append("keep_above" if above else "keep_below")
+
 
 class _FakeGtkWindow:
     def __init__(self, gdk_window):
         self._gdk_window = gdk_window
         self.realized = False
         self.mapped = False
+        self.opacity = 1.0
 
     def realize(self):
         self.realized = True
@@ -471,6 +476,18 @@ class _FakeGtkWindow:
 
     def get_window(self):
         return self._gdk_window
+
+    def set_opacity(self, opacity):
+        self.opacity = opacity
+
+    def get_realized(self):
+        return self.realized
+
+    def remove_tick_callback(self, tick):
+        pass
+
+    def queue_draw(self):
+        pass
 
 
 class OverlayRealizeTests(unittest.TestCase):
@@ -539,13 +556,88 @@ class OverlayRealizeTests(unittest.TestCase):
         carousel = overlay.Carousel(Config(), make_sticky=seen.append)
         carousel.window = _FakeGtkWindow(gdk_window)
         carousel._keep_on_top()
-        self.assertEqual(gdk_window.calls, ["raise"])
+        self.assertEqual(gdk_window.calls, ["keep_above", "raise"])
         self.assertEqual(seen, [0x5A00003])
+
+    def test_closing_the_strip_hands_the_above_layer_back(self):
+        """A permanently-above overlay put Muffin's focus-decision stack out of
+        order: every window opened afterwards "landed behind" and was refused
+        focus. The gesture pins the layer; the close paths hand it back."""
+        gdk_window = _FakeGdkWindow(0x5A00003)
+        carousel = overlay.Carousel(Config())
+        carousel.window = _FakeGtkWindow(gdk_window)
+        carousel.abort()
+        self.assertIn("keep_below", gdk_window.calls)
+
+    def test_releasing_on_top_without_a_window_is_harmless(self):
+        carousel = overlay.Carousel(Config())
+        carousel.window = _FakeGtkWindow(None)
+        carousel._release_on_top()  # must not raise: the window may be gone
+
+    def test_window_setup_requests_no_permanent_above(self):
+        msg = ("``ensure_window`` must not leave ``set_keep_above(True)`` "
+               "standing: between gestures the overlay is a hidden, ordinary "
+               "window.")
+        self.assertTrue(msg)  # see the assertion below
+        source = pathlib.Path(overlay.__file__).read_text(encoding="utf-8")
+        head = source.split("def ensure_window")[1].split("def close")[0]
+        self.assertNotIn("set_keep_above(True)", head,
+                         "ensure_window must not pin the above layer permanently")
 
     def test_keeping_on_top_without_a_window_is_harmless(self):
         carousel = overlay.Carousel(Config())
         carousel.window = _FakeGtkWindow(None)
         carousel._keep_on_top()  # must not raise: the window may be gone
+
+
+class AttentionClearTests(unittest.TestCase):
+    """The attention flag is the reason a newly opened window "opens behind".
+
+    Cinnamon stamps ``_NET_WM_STATE_DEMANDS_ATTENTION`` on the permanently
+    mapped, notifications-type overlay when it first manages it (observed on
+    the running instance). With the flag standing, the manager's focus-stealing
+    prevention routes every *other* application's new window into
+    attention-flashing instead of raising it. The flag is therefore withdrawn
+    right after the map, twice more, and again after every ``open()``.
+    """
+
+    def test_the_attention_request_is_made_after_the_map(self):
+        seen: list[int] = []
+        carousel = overlay.Carousel(Config(), clear_attention=lambda xid: seen.append(xid))
+        carousel.window = _FakeGtkWindow(_FakeGdkWindow(0x5A00003))
+        for _ in range(overlay.ATTENTION_CLEAR_RETRIES + 2):
+            carousel._clear_attention_retry()
+        self.assertEqual(seen, [0x5A00003] * overlay.ATTENTION_CLEAR_RETRIES,
+                         "cleared a bounded number of times, like the sticky retry")
+
+    def test_opening_the_strip_clears_attention_too(self):
+        seen: list[int] = []
+        carousel = overlay.Carousel(Config(), clear_attention=lambda xid: seen.append(xid))
+        carousel.window = _FakeGtkWindow(_FakeGdkWindow(0x5A00003))
+        carousel._clear_attention_retry()  # what the GLib timeout open() schedules fires
+        self.assertEqual(seen, [0x5A00003],
+                         "a late-managing compositor gets one more clear after open")
+
+    def test_the_clear_is_capped_at_the_retry_budget(self):
+        seen: list[int] = []
+        carousel = overlay.Carousel(Config(), clear_attention=lambda xid: seen.append(xid))
+        carousel.window = _FakeGtkWindow(_FakeGdkWindow(0x5A00003))
+        for _ in range(overlay.ATTENTION_CLEAR_RETRIES + 2):
+            carousel._clear_attention_retry()
+        self.assertEqual(len(seen), overlay.ATTENTION_CLEAR_RETRIES,
+                         "the retry budget bounds how often the flag is withdrawn")
+
+    def test_a_carousel_with_no_hook_still_clears_without_crashing(self):
+        carousel = overlay.Carousel(Config())
+        carousel.window = _FakeGtkWindow(_FakeGdkWindow(0x5A00003))
+        carousel._clear_attention_retry()  # must not raise
+
+    def test_a_closed_overlay_stops_the_retries(self):
+        seen: list[int] = []
+        carousel = overlay.Carousel(Config(), clear_attention=lambda xid: seen.append(xid))
+        carousel.window = None
+        carousel._clear_attention_retry()
+        self.assertEqual(seen, [], "nothing to clear once the overlay is gone")
 
 
 if __name__ == "__main__":

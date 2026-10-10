@@ -136,7 +136,15 @@ class WinTab:
         # The overlay is created on the workspace winTab starts in, and the
         # window manager will only ever composite it there unless it is told
         # otherwise before the window is first mapped.
-        self.overlay = Carousel(config, make_sticky=self.wm.make_sticky) if use_overlay else None
+        self.overlay = (
+            Carousel(
+                config,
+                make_sticky=self.wm.make_sticky,
+                clear_attention=self.wm.clear_attention,
+            )
+            if use_overlay
+            else None
+        )
         self.lock = PointerLock()
 
         self._queue: list = []

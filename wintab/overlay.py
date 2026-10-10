@@ -53,6 +53,7 @@ from gi.repository import Gdk, GLib, Gtk  # noqa: E402
 from PIL import Image  # noqa: E402
 
 from .gesture import apply_rubber_band, highlight_index  # noqa: E402
+from .apps import clear_attention
 
 IDLE = "idle"
 DRAG = "drag"
@@ -65,6 +66,16 @@ _SLIDE_DECAY = 3.0
 #: to be one the manager knows -- before it will accept the request at all.
 STICKY_RETRY_MS = 400
 STICKY_RETRIES = 3
+
+#: The attention flag is stamped on when the manager first takes the window
+#: on, and again after every sticky re-assertion -- so it is cleared at exactly
+#: those moments, plus after the first ``open()`` in case the manager came back
+#: late (a compositor restart against a running winTab). Left standing, the
+#: flag makes every newly opened application "open behind": Cinnamon's focus
+#: stealing prevention sees a window-that-wants-attention and routes the new
+#: window into flashing instead of raising it.
+ATTENTION_CLEAR_DELAY_MS = 1200
+ATTENTION_CLEAR_RETRIES = 4
 
 
 def caption_baseline(card_top: float, card_height: float, gap_px: float,
@@ -291,12 +302,19 @@ class Card:
 class Carousel:
     """Owns the overlay window, the card strip and the selection."""
 
-    def __init__(self, config, make_sticky=None):
+    def __init__(self, config, make_sticky=None, clear_attention=None):
         self.config = config
         #: Called with the overlay's X window id as soon as the window exists,
         #: before it is ever mapped. The app uses it to ask the window manager
         #: to draw the strip on every workspace; None is for tests with no X.
         self._make_sticky = make_sticky
+        #: Called with the overlay's X window id shortly after it is mapped
+        #: (and again with every sticky re-assertion): the app withdraws the
+        #: ``_NET_WM_STATE_DEMANDS_ATTENTION`` flag the manager stamps on a
+        #: permanently-mapped notifications-type window, which otherwise makes
+        #: its focus-stealing prevention route every newly opened application
+        #: into "flash for attention" instead of raising it. None = tests.
+        self._clear_attention_callback = clear_attention
         self.window: Gtk.Window | None = None
 
         # layout, recomputed whenever the strip opens
@@ -344,6 +362,10 @@ class Carousel:
         self._fade_t0 = 0.0
         self._on_done = None
 
+        # Withdrawing the attention flag the window manager stamps on the
+        # overlay when it first takes it on (see the constant, below).
+        self._attention_clears = 0
+
         self._sticky_tries = 0
 
         self._ticks = 0
@@ -376,7 +398,14 @@ class Carousel:
         win.set_accept_focus(False)
         win.set_focus_on_map(False)
         win.set_type_hint(Gdk.WindowTypeHint.NOTIFICATION)
-        win.set_keep_above(True)
+        # NOTE: keep-above is deliberately NOT set here. Muffin stacks by layer
+        # and keeps an ABOVE window at the very top of the stack it compares
+        # against when a new window maps; a permanently above overlay made every
+        # subsequently opened application "land behind" -- the manager denied it
+        # focus (focus-stealing prevention) and hung the attention flag on it
+        # instead. The strip's visibility is a gesture's lifetime, so `open()`
+        # pins ABOVE (via _keep_on_top) and the close paths hand the layer back
+        # (see _release_on_top).
         visual = screen.get_rgba_visual()
         if visual is not None:
             win.set_visual(visual)
@@ -392,6 +421,7 @@ class Carousel:
         gdk_window.input_shape_combine_region(cairo.Region(), 0, 0)
         map_overlay(win, gdk_window, self._make_sticky)
         self._retry_sticky_soon()
+        self._clear_attention_soon()
         self.window = win
         return win
 
@@ -663,6 +693,12 @@ class Carousel:
         window = self._window()
         window.set_opacity(1.0)
         self._keep_on_top()
+        # A manager that (re)appeared while winTab was running -- or one that
+        # only now got around to managing the overlay -- stamps the attention
+        # flag on when it takes the window on. The flag makes every *next*
+        # natural window-open "land behind", so it is withdrawn immediately
+        # instead of waiting for the map-time retries.
+        self._clear_attention_soon()
         window.queue_draw()
 
     def forget_screen_cards(self) -> None:
@@ -754,6 +790,7 @@ class Carousel:
         self._stop_ticks()
         if self.window is not None:
             self.window.set_opacity(0.0)
+            self._release_on_top()
             self.window.queue_draw()
         if on_done:
             on_done()
@@ -853,23 +890,81 @@ class Carousel:
             return False
         self._sticky_tries += 1
         self._assert_sticky()
+        # A sticky re-assertion re-runs the state machinery that stamps the
+        # attention flag on, so the map-time "clear" above has to be repeated
+        # alongside it -- the two requests ride together for the window's
+        # whole life.
+        self._clear_attention_soon()
         return self._sticky_tries < STICKY_RETRIES
 
+    # -- the attention flag --------------------------------------------------
+    def _clear_attention_soon(self) -> None:
+        """Ask the manager to hand the attention flag back, shortly from now.
+
+        Right after the map the flag is already standing (observed on this
+        session's running instance), and it is re-set by every later sticky
+        request. The removal message is only honoured for a window the manager
+        has taken on entirely, which may be a beat behind the map -- hence the
+        retry loop rather than a single, optimistic call.
+        """
+        GLib.timeout_add(ATTENTION_CLEAR_DELAY_MS, self._clear_attention_retry)
+
+    def _clear_attention_retry(self) -> bool:
+        if self._attention_clears >= ATTENTION_CLEAR_RETRIES:
+            return False  # capped, like the sticky retries
+        if self.window is None:
+            return False  # overlay closed: nothing to clear
+        gdk_window = self.window.get_window()
+        if gdk_window is not None:
+            self._clear_attention(int(gdk_window.get_xid()))
+        self._attention_clears += 1
+        return self._attention_clears < ATTENTION_CLEAR_RETRIES
+
+    def _clear_attention(self, xid: int) -> None:
+        """Withdraw DEMANDS_ATTENTION (the app supplies the actual request)."""
+        if self._clear_attention_callback is not None:
+            self._clear_attention_callback(int(xid))
+
     def _keep_on_top(self) -> None:
-        """Raise the overlay, in case arriving somewhere restacked us under.
+        """Pin ABOVE for the life of a gesture and raise the overlay.
 
         Nothing unmaps the window, but every workspace brings its own windows
         and moving to one restacks them; raising before each open costs a single
         XConfigureWindow and is the difference between a visible strip and a
         silent switch. The sticky request goes out with it, which is also the
         answer to a compositor that has been restarted since we last spoke.
+
+        The ABOVE state is set here rather than once at map time on purpose:
+        while it stands between gestures, Muffin keeps this full-screen window
+        at the head of the stack it consults when a *new* application window
+        maps, and focus-stealing prevention then denies that window focus --
+        it opens behind and heads up flashing (measured: a launched calculator
+        kept ``_NET_WM_STATE_DEMANDS_ATTENTION`` indefinitely with ABOVE
+        standing, and focused in 0.1s with it gone). With fingers down nothing
+        else can appear, so the layer only has to cover the gesture.
         """
         self._assert_sticky()
         if self.window is None:
             return
         gdk_window = self.window.get_window()
         if gdk_window is not None:
+            gdk_window.set_keep_above(True)
             gdk_window.raise_()
+
+    def _release_on_top(self) -> None:
+        """Hand the above-layer back once the strip is gone.
+
+        The mirror of ``_keep_on_top``: called when the strip finishes fading
+        (or is aborted), so between gestures the overlay is an ordinary window
+        that no longer sits at the head of Muffin's focus-decision stack.
+        GTK applies keep-above via two X calls (the state message and
+        XConfigureWindow); undoing both matches what the setter did.
+        """
+        if self.window is None:
+            return
+        gdk_window = self.window.get_window()
+        if gdk_window is not None:
+            gdk_window.set_keep_above(False)
 
     def _begin_fade(self) -> None:
         self._fade_from = 1.0
@@ -937,6 +1032,11 @@ class Carousel:
         self._cards = []
         if self.window is not None:
             self.window.set_opacity(0.0)
+            # The strip is gone: give the above-layer back. Keeping it would
+            # pin this full-screen window at the head of Muffin's focus-decision
+            # stack and make every newly opened application "open behind"
+            # (see _keep_on_top for the measured failure).
+            self._release_on_top()
             self.window.queue_draw()
         self._stop_ticks()
         callback, self._on_done = self._on_done, None

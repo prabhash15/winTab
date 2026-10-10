@@ -396,6 +396,42 @@ def make_sticky(display, root, xid: int) -> bool:
     return True
 
 
+def clear_attention(display, root, xid: int) -> bool:
+    """Withdraw ``_NET_WM_STATE_DEMANDS_ATTENTION`` from one of our windows.
+
+    The overlay is a full-screen, sticky, keep-above window that stays mapped
+    for the whole session, and Cinnamon stamps every such ``NOTIFICATION``
+    window with the attention flag when it first manages it -- as if it were a
+    notification bubble waiting to be read. An unread flag sitting on screen
+    permanently is poison for everything the manager does next: its
+    focus-stealing prevention sees "a window wants attention" every time
+    another application maps a new window, and routes that window into
+    attention-flashing instead of raising and focusing it -- so the newly
+    opened program sits behind the one you were using until you click it.
+
+    The flag has nothing to do with what a window *will* draw; it is set at
+    manage time regardless of opacity, so it cannot be designed away. The EWMH
+    way to withdraw it is the ``_NET_WM_STATE`` client message with action 0
+    (remove), naming the flag, with source indication 1 ("from the
+    application", i.e. from us on our own window). A window manager honours
+    that for a window it manages, which is exactly what ours is by then.
+    """
+    try:
+        message = xevent.ClientMessage(
+            window=int(xid),
+            client_type=display.intern_atom("_NET_WM_STATE"),
+            # [action = remove, first property, second property, source = app]
+            data=(32, [0, display.intern_atom("_NET_WM_STATE_DEMANDS_ATTENTION"), 0, 1, 0]),
+        )
+        root.send_event(
+            message, event_mask=X.SubstructureRedirectMask | X.SubstructureNotifyMask
+        )
+        display.flush()
+    except (XError, AttributeError, TypeError, ValueError):
+        return False
+    return True
+
+
 class WindowManager:
     def __init__(self, config):
         self.config = config
@@ -734,6 +770,16 @@ class WindowManager:
     def make_sticky(self, xid: int) -> bool:
         """Put one of our own windows -- the overlay -- on every workspace."""
         return make_sticky(self.display, self.root, xid)
+
+    def clear_attention(self, xid: int) -> bool:
+        """Take the attention flag off one of our windows (the overlay) again.
+
+        Needed right after the map, when Cinnamon stamps the flag on, and after
+        every sticky re-assertion, which re-runs the state machinery that set
+        it. Existing flags on other applications' windows are never touched:
+        the request is sent only for our own xid.
+        """
+        return clear_attention(self.display, self.root, xid)
 
     def refresh_mru(self) -> None:
         self.mru.seed_from_stacking(self.stacking_order())
